@@ -211,7 +211,6 @@ type
     pnlSpaceSubTop2: TPanel;
     ScrollBox2: TScrollBox;
     vlistOptionalSub: TGUIPanelVList;
-    pnlWindows: TPanel;
     imgConfused: TImage;
     lblWindows: TLabel;
     lblCaptMain: TLabel;
@@ -350,7 +349,6 @@ type
     FDeliveryDirsOK    : Boolean;
     FFreeSpaceOK       : Boolean;
     FHostsFileOK       : Boolean;
-    FPiratedWindows    : Boolean;
     FServiceOKArr      : Array[0 .. 5] of Boolean;
     FRegistryOK        : Boolean;
     FBlockersFound     : Boolean;
@@ -433,9 +431,6 @@ type
 
     Function Analyze_CanWrite() : Boolean;
     Procedure Analyze_Start_Cmd();
-    Function Analyze_GenuineWindows_CheckFile(const Filename : String) : Boolean;
-    Procedure Analyze_GenuineWindows();
-    Function GetFileSize(const Filename : String) : Int64; // in bytes
 
     Procedure Process_Init();
     Procedure Process_Init_Bat();
@@ -631,224 +626,6 @@ begin
 
 end;
 
-// Result : True => All is now done
-Function TMainForm.Analyze_GenuineWindows_CheckFile(const Filename : String) : Boolean;
-Var
- FileData : String;
-begin
- Result := False;
-
- if FileExists_Cached(Filename) = False then
- begin
-  {$IFDEF Debug_GenerateDebugLog} DebugLog('Analyze_GenuineWindows_CheckFile File does not exist: ' + ExtractFilename(Filename)); {$ENDIF}
-  EXIT;
- End;
-
- FileData := RawReadFile_UTF8(Filename);
- if Length(FileData) < 5 then
- begin
-  {$IFDEF Debug_GenerateDebugLog} DebugLog('Analyze_GenuineWindows_CheckFile: (nodata)'); {$ENDIF}
-  EXIT;
- end;
-
-
- if FastPosExB('license', FileData) then Result := True;
-
- if FastPosExB('non-genuine', FileData) or
-    FastPosExB('(null)', FileData) or
-    FastPosExB('slui.exe', FileData) then FPiratedWindows := True;
-
-
- {$IFDEF Debug_GenerateDebugLog}
-   DebugLog('Analyze_GenuineWindows_CheckFile: ' + FileData);
- {$ENDIF}
-
-end;
-
-
-
-Function TMainForm.GetFileSize(const Filename : String) : Int64;
-var
- Sr : TSearchRec;
-begin
-
- Result := -1;
-
- Try
-   Try
-    Sr.FindData.nFileSizeHigh := 0;
-    Sr.FindData.nFileSizeLow := 0;
-    FindFirst(Filename, faAnyFile, Sr);
-    Result := Int64(Sr.FindData.nFileSizeHigh) shl Int64(32) +
-              Int64(Sr.FindData.nFileSizeLow);
-
-    {$IFDEF Debug_GenerateDebugLog} DebugLog('GetFileSize ' + ExtractFilename(Filename) + ' [32b]: ' + IntToStr(Result)); {$ENDIF}
-   Finally
-    if Result < 0 then Result := 0;
-   	FindClose(sr);
-   End;
-
-   if (Result < 1) and
-      (Is64bitWindows()) and
-      (Assigned(GLOBAL_Wow64RevertWow64FsRedirection)) and
-      (Assigned(GLOBAL_Wow64DisableWow64FsRedirection)) then
-   begin
-    GLOBAL_Wow64DisableWow64FsRedirection(GLOBAL_Wow64FsEnableRedirection);
-
-     Try
-      Sr.FindData.nFileSizeHigh := 0;
-      Sr.FindData.nFileSizeLow := 0;
-      FindFirst(Filename, faAnyFile, Sr);
-      Result := Int64(Sr.FindData.nFileSizeHigh) shl Int64(32) +
-                Int64(Sr.FindData.nFileSizeLow);
-
-      {$IFDEF Debug_GenerateDebugLog} DebugLog('GetFileSize ' + ExtractFilename(Filename) + ' [64b]: ' + IntToStr(Result)); {$ENDIF}
-     Finally
-      if Result < 0 then Result := 0;
-      FindClose(sr);
-      GLOBAL_Wow64RevertWow64FsRedirection(GLOBAL_Wow64FsEnableRedirection);
-     End;
-   End;
-
- Except
-  {$IFDEF Debug_GenerateDebugLog} DebugLog('Error: GetFileSize ' + ExtractFilename(Filename) + ' FAIL'); {$ENDIF}
-  Exit(-1);
- End;
-
-End;
-
-Procedure TMainForm.Analyze_GenuineWindows();
-Var
- i          : Integer;
- x          : Integer;
- Filename   : String;
- TmpFile    : String;
- Row        : String;
- ScriptData : TStringList;
-begin
-
-
- // Method 1: check whether Windows activation related files are missing or null
- Filename := ExpandPath('%WINDIR%\System32\slmgr.vbs');
- GetFileSize(Filename);
- If (FileExists_Cached(Filename) = False) or
-    (GetFileSize(Filename) < 1000*50) then
- begin
-  {$IFDEF Debug_GenerateDebugLog} DebugLog('Analyze_GenuineWindows Exit-1'); {$ENDIF}
-  FPiratedWindows := True;
-  EXIT;
- end;
-
- Filename := ExpandPath('%WINDIR%\System32\slui.exe');
- GetFileSize(Filename);
- If (FileExists_Cached(Filename) = False) or
-    (GetFileSize(Filename) < 1000*100) then
- begin
-  {$IFDEF Debug_GenerateDebugLog} DebugLog('Analyze_GenuineWindows Exit-2'); {$ENDIF}
-  FPiratedWindows := True;
-  EXIT;
- end;
-
-
-
- // Method 1:
- If FileExists_Cached(FWinGenCheckResultFile) then
- begin
-  {$IFDEF Debug_GenerateDebugLog} DebugLog('Analyze_GenuineWindows Primary Check Start'); {$ENDIF}
-  If Analyze_GenuineWindows_CheckFile(FWinGenCheckResultFile) then EXIT;
- end else
- begin
-  {$IFDEF Debug_GenerateDebugLog} DebugLog('Analyze_GenuineWindows Primary Check SKIPPED'); {$ENDIF}
- end;
-
-
- // Method 2 - should only happen in non English Windows:
- // c:\windows\system32\slmgr.vbs /DLI result is LOCALIZED,
- // Hence, we need to do this very hacky solution of creating a copy of slmgr.vbs,
- // editing that copy not to translate (localize) its output and run that instead
- // of running the original vbs file.
- // Todo: To detect whether user is using a genuine Windows with a more elegant way
- Filename := ExpandPath('%WINDIR%\System32\slmgr.vbs');
- ScriptData := TStringList.Create;
- ScriptData.text := RawReadFile_UTF8(Filename);
-
- if ScriptData.Count < 1000 then
- begin
-  {$IFDEF Debug_GenerateDebugLog} DebugLog('Analyze_GenuineWindows Exit-3'); {$ENDIF}
-  ScriptData.Free;
-  FPiratedWindows := True;
-  EXIT;
- end;
-
- i := 0;
- While i <= ScriptData.Count-5 do
- begin
-  Inc(i);
-  Row := ScriptData[i];
-
-  if FastPosExB('function GetResource(name)', Row) or
-     FastPosExB('sub GetResource(name)', Row) then
-  begin
-   Inc(i);
-   ScriptData[i] := '  GetResource = Eval(name)';
-   for x := i+1 to ScriptData.Count-1 do
-   begin
-    if FastPosExB('End Function', ScriptData[x]) then Break;
-    if FastPosExB('End Sub', ScriptData[x]) then Break;
-    ScriptData[x] := '';
-   end;
-  end;
- end;
-
- Filename := GetTempDir() + 'se_can_delete_qq_' + IntToStr(GetTickCount64()) + '.vbs';
- TmpFile  := GetTempDir() + 'se_can_delete_qq_' + IntToStr(GetTickCount64()) + '.tmp';
-
- Try
-  ScriptData.SaveToFile(Filename, TEncoding.ANSI); // Important: VBS scripts don't like no UTF8 encoding!
- except
-  {$IFDEF Debug_GenerateDebugLog} on E : Exception do DebugLog('Error: Analyze_GenuineWindows Save Exception: ' + E.Message); {$ENDIF}
- end;
-
- ScriptData.Free;
- If FileExists_Cached(Filename) = False then
- begin
-  {$IFDEF Debug_GenerateDebugLog} DebugLog('Analyze_GenuineWindows Exit-4'); {$ENDIF}
-  FPiratedWindows := True; // yeah, we gonna assume pirated Windows in this case, too
-  EXIT;
- End;
-
- x := RunBatchFileAndWait_GetCount();
- ShellExecuteDo('cmd.exe', '/C cscript /Nologo "' + Filename + '" /DLI > "' + TmpFile + '"');
-
- // Wait for the modified script to run:
- for i := 1 to 8 do
- begin
-  UI_Sleep(1000);
-  if (RunBatchFileAndWait_GetCount() <= x) or (FileExists_Cached(TmpFile)) then Break;
- End;
-
- UI_Sleep(1000);
- {$IFDEF Debug_GenerateDebugLog} DebugLog('Analyze_GenuineWindows Final Check Start'); {$ENDIF}
-
- If (FileExists_Cached(TmpFile) = False) or
-    (GetFileSize(TmpFile) < 10) then
- begin
-  {$IFDEF Debug_GenerateDebugLog} DebugLog('Analyze_GenuineWindows Exit-5'); {$ENDIF}
-  FPiratedWindows := True;
- end else
- begin
-  Analyze_GenuineWindows_CheckFile(TmpFile);
- end;
-
-
- Try
-  If FileExists_Cached(TmpFile) then DeleteFile(TmpFile);
- except
-  {$IFDEF Debug_GenerateDebugLog} on E : Exception do DebugLog('Error: Analyze_GenuineWindows Delete Exception: ' + E.Message); {$ENDIF}
- end;
-
-end;
-
 
 procedure TMainForm.btnAnalyzeClick(Sender: TObject);
 Var
@@ -911,7 +688,6 @@ begin
  FRegistryOK        := True;
  FHostsFileOK       := True;
  FBlockersFound     := False;
- FPiratedWindows    := False;
  AllServicesOK      := True;
  for i := Low(FServiceOKArr) to High(FServiceOKArr) do FServiceOKArr[i] := True;
 
@@ -949,21 +725,11 @@ begin
  Analyze_HostsFile();
  UI_IncProgress();
 
- {$IFDEF Debug_GenerateDebugLog} DebugLog('Analyze Step 9'); {$ENDIF}
- Analyze_GenuineWindows();
- UI_IncProgress();
-
  Try
   if FileExists_Cached(FWinGenCheckResultFile) then DeleteFile(FWinGenCheckResultFile);
  except
   {$IFDEF Debug_GenerateDebugLog}on E : Exception do DebugLog('Error: FCmdResultFile Delete Exception: ' + E.Message); {$ENDIF}
  end;
-
-
- {$IFDEF Debug_GenerateDebugLog}
-   If FPiratedWindows = False then DebugLog('Analyze IsGenuineWindows: True')
-   else DebugLog('Analyze IsGenuineWindows: FALSE!');
- {$ENDIF}
 
  {$IFDEF Debug_GenerateDebugLog} DebugLog('Analyze Done'); {$ENDIF}
 
@@ -976,28 +742,8 @@ begin
    FRegistryOK        := True;
    FHostsFileOK       := True;
    FBlockersFound     := False;
-   FPiratedWindows    := False;
    for i := Low(FServiceOKArr) to High(FServiceOKArr) do FServiceOKArr[i] := True;
  end;
-
- If DEBUG_PIRATED = 1 then FPiratedWindows := True;
- // **
-
-
- // All is done, let's just build the results:
- if FPiratedWindows then
- begin
-   lblWindows.Caption := _t('This copy of Windows does not seem to be genuine. ' +
-    'If your Windows Update is not working and Update Fixer is unable to fix it, this is probably the reason. ' +
-    'Update Fixer has not been designed to fix malware or pirated software related issues with Windows Update.', 'updatefixer.piracy-warning');
-
-  lblThanks.Caption := Trim(lblThanks.Caption) + #13#10 + #13#10 +
-    _t('Note: This copy of Windows does not seem to be genuine. Update Fixer has not been designed to fix malware or pirated software related issues with Windows Update.' , 'updatefixer.piracy-warning');
-
-  pnlWindows.Visible := True;
- end else pnlWindows.Visible := False;
-
-
 
  // **
  // **
@@ -1180,8 +926,7 @@ begin
   FServiceCheckboxes[0].Checked := True;
   chkRegistry.Checked := True;
 
-  if FPiratedWindows then imgNothing.Visible := False
-  else imgNothing.Visible := True;
+  imgNothing.Visible := True;
 
   vlistRecommendedSub.Visible := False;
   pnlNothing.Parent := vlistRecommended;
@@ -1635,7 +1380,7 @@ begin
 
   if FastPosExB('error', Str) or
      FastPosExB('exception', Str) then Inc(FErrors);
-  
+
  end else bHighlight := False;
 
  FDebugLog.Add('[' + IntToStr(GetTickCount) + ']: ' + Str);
@@ -2351,7 +2096,7 @@ begin
  FCheckboxes.Add(chkHostsFile);
  FCheckboxes.Add(chkRegistry);
  FCheckboxes.Add(chkBlockers);
- 
+
  FCheckboxes.Add(chkService0);
  FCheckboxes.Add(chkService1);
  FCheckboxes.Add(chkService2);
